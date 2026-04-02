@@ -73,7 +73,8 @@ class DingTalkFeishuForwarder(Star):
         for k in expired:
             del self._seen_messages[k]
 
-        msg_id = getattr(event.message_obj, "message_id", "") or ""
+        msg_obj = getattr(event, "message_obj", None)
+        msg_id = getattr(msg_obj, "message_id", "") or ""
         if not msg_id:
             return False
 
@@ -90,7 +91,6 @@ class DingTalkFeishuForwarder(Star):
         if not self._enabled or not self.feishu_target_session:
             return
         if self._is_bot_message(event) or self._is_duplicate(event):
-            event.stop_event()
             return
 
         msg_str = event.get_message_str()
@@ -117,7 +117,6 @@ class DingTalkFeishuForwarder(Star):
         if not self._enabled or not self.dingtalk_target_session:
             return
         if self._is_bot_message(event) or self._is_duplicate(event):
-            event.stop_event()
             return
 
         msg_str = event.get_message_str()
@@ -151,6 +150,7 @@ class DingTalkFeishuForwarder(Star):
             return MessageChain(chain=[Plain(fallback)])
 
         chain: list[BaseMessageComponent] = []
+        has_unsupported = False
         for comp in messages:
             if isinstance(comp, Plain):
                 chain.append(comp)
@@ -160,6 +160,11 @@ class DingTalkFeishuForwarder(Star):
                     chain.append(Image.fromURL(url) if url.startswith("http") else Image(file=url))
                 else:
                     chain.append(Plain("[图片无法转发，请在原平台查看]"))
+            else:
+                has_unsupported = True
+
+        if has_unsupported and chain:
+            chain.append(Plain("\n[包含未支持的消息组件，请在原平台查看完整内容]"))
 
         if not chain:
             fallback = fallback_text.strip() if fallback_text.strip() else UNSUPPORTED_MSG_FALLBACK
