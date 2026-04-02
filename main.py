@@ -143,7 +143,8 @@ class DingTalkFeishuForwarder(Star):
     ) -> MessageChain:
         """从原始消息链构建转发消息链，保留图片等富文本组件。"""
         if not messages:
-            return MessageChain(chain=[Plain(fallback_text)])
+            fallback = fallback_text if fallback_text.strip() else "[不支持的消息类型，请在原平台查看]"
+            return MessageChain(chain=[Plain(fallback)])
 
         chain: list[BaseMessageComponent] = []
         for comp in messages:
@@ -151,7 +152,8 @@ class DingTalkFeishuForwarder(Star):
                 chain.append(comp)
 
         if not chain:
-            return MessageChain(chain=[Plain(fallback_text)])
+            fallback = fallback_text if fallback_text.strip() else "[不支持的消息类型，请在原平台查看]"
+            return MessageChain(chain=[Plain(fallback)])
 
         return MessageChain(chain=chain)
 
