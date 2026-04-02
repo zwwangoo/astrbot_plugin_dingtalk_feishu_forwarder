@@ -10,6 +10,8 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.message.components import BaseMessageComponent, Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
 
+UNSUPPORTED_MSG_FALLBACK = "[不支持的消息类型，请在原平台查看]"
+
 
 @register(
     "dingtalk_feishu_forwarder",
@@ -33,7 +35,6 @@ class DingTalkFeishuForwarder(Star):
         self.dingtalk_target_session = raw_config.get(
             "dingtalk_target_session", ""
         )
-
         self._enabled = bool(
             self.feishu_target_session or self.dingtalk_target_session
         )
@@ -43,8 +44,6 @@ class DingTalkFeishuForwarder(Star):
         self._d2f_failure = 0
         self._f2d_success = 0
         self._f2d_failure = 0
-
-        # 消息去重缓存 {platform:message_id: timestamp}
         self._seen_messages: dict[str, float] = {}
         self._dedup_ttl = 30
 
@@ -61,66 +60,14 @@ class DingTalkFeishuForwarder(Star):
                 "可通过 /sid 命令在对应平台获取。"
             )
 
-    @filter.event_message_type(EventMessageType.ALL)
-    @filter.platform_adapter_type(PlatformAdapterType.DINGTALK)
-    async def on_dingtalk_message(self, event: AstrMessageEvent):
-        """收到钉钉消息 → 转发到飞书"""
-        if not self._enabled or not self.feishu_target_session:
-            return
-        if self._is_duplicate(event):
-            event.stop_event()
-            return
-
-        msg_str = event.get_message_str()
-        messages = event.get_messages()
-        if not msg_str and not messages:
-            return
-
-        sender_name = event.get_sender_name() or "未知用户"
-        logger.info("钉钉→飞书转发: sender=%s, msg=%s", sender_name, event.get_message_outline()[:50])
-
-        try:
-            chain = self._build_forward_chain(messages, msg_str)
-            await StarTools.send_message(self.feishu_target_session, chain)
-            self._d2f_success += 1
-            logger.info("钉钉→飞书转发成功")
-        except Exception:
-            self._d2f_failure += 1
-            logger.error("钉钉→飞书转发失败", exc_info=True)
-
-        event.stop_event()
-
-    @filter.event_message_type(EventMessageType.ALL)
-    @filter.platform_adapter_type(PlatformAdapterType.LARK)
-    async def on_feishu_message(self, event: AstrMessageEvent):
-        """收到飞书消息 → 转发到钉钉"""
-        if not self._enabled or not self.dingtalk_target_session:
-            return
-        if self._is_duplicate(event):
-            event.stop_event()
-            return
-
-        msg_str = event.get_message_str()
-        messages = event.get_messages()
-        if not msg_str and not messages:
-            return
-
-        sender_name = event.get_sender_name() or "未知用户"
-        logger.info("飞书→钉钉转发: sender=%s, msg=%s", sender_name, event.get_message_outline()[:50])
-
-        try:
-            chain = self._build_forward_chain(messages, msg_str)
-            await StarTools.send_message(self.dingtalk_target_session, chain)
-            self._f2d_success += 1
-            logger.info("飞书→钉钉转发成功")
-        except Exception:
-            self._f2d_failure += 1
-            logger.error("飞书→钉钉转发失败", exc_info=True)
-
-        event.stop_event()
+    def _is_bot_message(self, event: AstrMessageEvent) -> bool:
+        """检查消息是否由机器人自身发送，防止回环。"""
+        sender_id = event.get_sender_id()
+        self_id = event.get_self_id()
+        return bool(self_id and sender_id == self_id)
 
     def _is_duplicate(self, event: AstrMessageEvent) -> bool:
-        """检查消息是否重复（按平台+消息ID去重）。"""
+        """检查消息是否重复（按平台+会话+消息ID去重）。"""
         now = time.time()
         expired = [k for k, v in self._seen_messages.items() if now - v > self._dedup_ttl]
         for k in expired:
@@ -132,27 +79,90 @@ class DingTalkFeishuForwarder(Star):
 
         dedup_key = f"{event.get_platform_name()}:{event.session_id}:{msg_id}"
         if dedup_key in self._seen_messages:
-            logger.debug("跳过重复消息: %s", dedup_key)
             return True
         self._seen_messages[dedup_key] = now
         return False
+
+    @filter.event_message_type(EventMessageType.ALL)
+    @filter.platform_adapter_type(PlatformAdapterType.DINGTALK)
+    async def on_dingtalk_message(self, event: AstrMessageEvent):
+        """收到钉钉消息 → 转发到飞书"""
+        if not self._enabled or not self.feishu_target_session:
+            return
+        if self._is_bot_message(event) or self._is_duplicate(event):
+            event.stop_event()
+            return
+
+        msg_str = event.get_message_str()
+        messages = event.get_messages()
+        if not msg_str and not messages:
+            return
+
+        logger.info("钉钉→飞书转发: session=%s", event.session_id)
+
+        try:
+            chain = self._build_forward_chain(messages, msg_str)
+            await StarTools.send_message(self.feishu_target_session, chain)
+            self._d2f_success += 1
+            logger.info("钉钉→飞书转发成功")
+            event.stop_event()
+        except Exception:
+            self._d2f_failure += 1
+            logger.error("钉钉→飞书转发失败", exc_info=True)
+
+    @filter.event_message_type(EventMessageType.ALL)
+    @filter.platform_adapter_type(PlatformAdapterType.LARK)
+    async def on_feishu_message(self, event: AstrMessageEvent):
+        """收到飞书消息 → 转发到钉钉"""
+        if not self._enabled or not self.dingtalk_target_session:
+            return
+        if self._is_bot_message(event) or self._is_duplicate(event):
+            event.stop_event()
+            return
+
+        msg_str = event.get_message_str()
+        messages = event.get_messages()
+        if not msg_str and not messages:
+            return
+
+        logger.info("飞书→钉钉转发: session=%s", event.session_id)
+
+        try:
+            chain = self._build_forward_chain(messages, msg_str)
+            await StarTools.send_message(self.dingtalk_target_session, chain)
+            self._f2d_success += 1
+            logger.info("飞书→钉钉转发成功")
+            event.stop_event()
+        except Exception:
+            self._f2d_failure += 1
+            logger.error("飞书→钉钉转发失败", exc_info=True)
 
     @staticmethod
     def _build_forward_chain(
         messages: list[BaseMessageComponent], fallback_text: str
     ) -> MessageChain:
-        """从原始消息链构建转发消息链，保留图片等富文本组件。"""
+        """从原始消息链构建转发消息链。
+
+        保留 Plain 文本组件；Image 组件尝试通过 URL 重建，
+        无法重建时降级为文字提示。
+        """
         if not messages:
-            fallback = fallback_text if fallback_text.strip() else "[不支持的消息类型，请在原平台查看]"
+            fallback = fallback_text.strip() if fallback_text.strip() else UNSUPPORTED_MSG_FALLBACK
             return MessageChain(chain=[Plain(fallback)])
 
         chain: list[BaseMessageComponent] = []
         for comp in messages:
-            if isinstance(comp, (Plain, Image)):
+            if isinstance(comp, Plain):
                 chain.append(comp)
+            elif isinstance(comp, Image):
+                url = comp.url or comp.file or ""
+                if url:
+                    chain.append(Image.fromURL(url) if url.startswith("http") else Image(file=url))
+                else:
+                    chain.append(Plain("[图片无法转发，请在原平台查看]"))
 
         if not chain:
-            fallback = fallback_text if fallback_text.strip() else "[不支持的消息类型，请在原平台查看]"
+            fallback = fallback_text.strip() if fallback_text.strip() else UNSUPPORTED_MSG_FALLBACK
             return MessageChain(chain=[Plain(fallback)])
 
         return MessageChain(chain=chain)
