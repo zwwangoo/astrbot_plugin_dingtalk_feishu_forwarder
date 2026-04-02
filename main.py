@@ -2,21 +2,13 @@
 
 import time
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.event.filter import (
-    EventMessageType,
-    PlatformAdapterType,
-    event_message_type,
-    platform_adapter_type,
-    command,
-)
+from astrbot.api.event import filter
+from astrbot.api.event.filter import EventMessageType, PlatformAdapterType
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.message.components import BaseMessageComponent, Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
-
-from astrbot.api import logger
-
-FORWARD_TAG = "[FWD]"
 
 
 @register(
@@ -37,9 +29,7 @@ class DingTalkFeishuForwarder(Star):
 
         raw_config = dict(config) if config else {}
 
-        # 飞书目标 session（unified_msg_origin 格式）
         self.feishu_target_session = raw_config.get("feishu_target_session", "")
-        # 钉钉目标 session（unified_msg_origin 格式）
         self.dingtalk_target_session = raw_config.get(
             "dingtalk_target_session", ""
         )
@@ -48,16 +38,15 @@ class DingTalkFeishuForwarder(Star):
             self.feishu_target_session or self.dingtalk_target_session
         )
 
-        # 统计
         self._start_time = time.time()
         self._d2f_success = 0
         self._d2f_failure = 0
         self._f2d_success = 0
         self._f2d_failure = 0
 
-        # 消息去重缓存 {message_id: timestamp}
+        # 消息去重缓存 {platform:message_id: timestamp}
         self._seen_messages: dict[str, float] = {}
-        self._dedup_ttl = 30  # 30 秒内相同消息视为重复
+        self._dedup_ttl = 30
 
         if self._enabled:
             logger.info(
@@ -69,16 +58,13 @@ class DingTalkFeishuForwarder(Star):
             logger.warning(
                 "钉钉-飞书转发插件未配置目标 session，请在插件配置中填写 "
                 "feishu_target_session 和/或 dingtalk_target_session。"
-                "格式为 AstrBot 的 unified_msg_origin，"
                 "可通过 /sid 命令在对应平台获取。"
             )
 
-    @event_message_type(EventMessageType.ALL)
-    @platform_adapter_type(PlatformAdapterType.DINGTALK)
+    @filter.event_message_type(EventMessageType.ALL)
+    @filter.platform_adapter_type(PlatformAdapterType.DINGTALK)
     async def on_dingtalk_message(self, event: AstrMessageEvent):
         """收到钉钉消息 → 转发到飞书"""
-        logger.info("[转发插件] 收到钉钉消息事件, enabled=%s, target=%s", self._enabled, self.feishu_target_session)
-
         if not self._enabled or not self.feishu_target_session:
             return
         if self._is_duplicate(event):
@@ -102,15 +88,12 @@ class DingTalkFeishuForwarder(Star):
             self._d2f_failure += 1
             logger.error("钉钉→飞书转发失败", exc_info=True)
 
-        # 阻止 LLM 继续处理此消息
         event.stop_event()
 
-    @event_message_type(EventMessageType.ALL)
-    @platform_adapter_type(PlatformAdapterType.LARK)
+    @filter.event_message_type(EventMessageType.ALL)
+    @filter.platform_adapter_type(PlatformAdapterType.LARK)
     async def on_feishu_message(self, event: AstrMessageEvent):
         """收到飞书消息 → 转发到钉钉"""
-        logger.info("[转发插件] 收到飞书消息事件, enabled=%s, target=%s", self._enabled, self.dingtalk_target_session)
-
         if not self._enabled or not self.dingtalk_target_session:
             return
         if self._is_duplicate(event):
@@ -134,13 +117,11 @@ class DingTalkFeishuForwarder(Star):
             self._f2d_failure += 1
             logger.error("飞书→钉钉转发失败", exc_info=True)
 
-        # 阻止 LLM 继续处理此消息
         event.stop_event()
 
     def _is_duplicate(self, event: AstrMessageEvent) -> bool:
-        """检查消息是否重复，同时清理过期缓存。"""
+        """检查消息是否重复（按平台+消息ID去重）。"""
         now = time.time()
-        # 清理过期
         expired = [k for k, v in self._seen_messages.items() if now - v > self._dedup_ttl]
         for k in expired:
             del self._seen_messages[k]
@@ -148,10 +129,12 @@ class DingTalkFeishuForwarder(Star):
         msg_id = getattr(event.message_obj, "message_id", "") or ""
         if not msg_id:
             return False
-        if msg_id in self._seen_messages:
-            logger.debug("跳过重复消息: %s", msg_id)
+
+        dedup_key = f"{event.get_platform_name()}:{event.session_id}:{msg_id}"
+        if dedup_key in self._seen_messages:
+            logger.debug("跳过重复消息: %s", dedup_key)
             return True
-        self._seen_messages[msg_id] = now
+        self._seen_messages[dedup_key] = now
         return False
 
     @staticmethod
@@ -162,19 +145,17 @@ class DingTalkFeishuForwarder(Star):
         if not messages:
             return MessageChain(chain=[Plain(fallback_text)])
 
-        # 直接复用原始消息链中的组件
         chain: list[BaseMessageComponent] = []
         for comp in messages:
             if isinstance(comp, (Plain, Image)):
                 chain.append(comp)
 
-        # 如果消息链里没提取到有效组件，用纯文本兜底
         if not chain:
             return MessageChain(chain=[Plain(fallback_text)])
 
         return MessageChain(chain=chain)
 
-    @command("fwd_status")
+    @filter.command("fwd_status")
     async def fwd_status(self, event: AstrMessageEvent):
         """查询转发插件运行状态"""
         uptime = time.time() - self._start_time
