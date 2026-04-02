@@ -1,0 +1,190 @@
+"""AstrBot 钉钉-飞书双向消息转发插件入口"""
+
+import time
+
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event.filter import (
+    EventMessageType,
+    PlatformAdapterType,
+    event_message_type,
+    platform_adapter_type,
+    command,
+)
+from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.message.components import BaseMessageComponent, Image, Plain
+from astrbot.core.message.message_event_result import MessageChain
+
+from astrbot.api import logger
+
+FORWARD_TAG = "[FWD]"
+
+
+@register(
+    "dingtalk_feishu_forwarder",
+    "DingTalk-Feishu Forwarder",
+    "钉钉-飞书双向消息转发插件",
+    "1.0.0",
+)
+class DingTalkFeishuForwarder(Star):
+    """钉钉与飞书之间的双向消息转发插件。
+
+    收到钉钉消息 → 转发到飞书会话
+    收到飞书消息 → 转发到钉钉会话
+    """
+
+    def __init__(self, context: Context, config=None):
+        super().__init__(context)
+
+        raw_config = dict(config) if config else {}
+
+        # 飞书目标 session（unified_msg_origin 格式）
+        self.feishu_target_session = raw_config.get("feishu_target_session", "")
+        # 钉钉目标 session（unified_msg_origin 格式）
+        self.dingtalk_target_session = raw_config.get(
+            "dingtalk_target_session", ""
+        )
+
+        self._enabled = bool(
+            self.feishu_target_session or self.dingtalk_target_session
+        )
+
+        # 统计
+        self._start_time = time.time()
+        self._d2f_success = 0
+        self._d2f_failure = 0
+        self._f2d_success = 0
+        self._f2d_failure = 0
+
+        # 消息去重缓存 {message_id: timestamp}
+        self._seen_messages: dict[str, float] = {}
+        self._dedup_ttl = 30  # 30 秒内相同消息视为重复
+
+        if self._enabled:
+            logger.info(
+                "钉钉-飞书转发插件已启用。feishu_target=%s, dingtalk_target=%s",
+                self.feishu_target_session,
+                self.dingtalk_target_session,
+            )
+        else:
+            logger.warning(
+                "钉钉-飞书转发插件未配置目标 session，请在插件配置中填写 "
+                "feishu_target_session 和/或 dingtalk_target_session。"
+                "格式为 AstrBot 的 unified_msg_origin，"
+                "可通过 /sid 命令在对应平台获取。"
+            )
+
+    @event_message_type(EventMessageType.ALL)
+    @platform_adapter_type(PlatformAdapterType.DINGTALK)
+    async def on_dingtalk_message(self, event: AstrMessageEvent):
+        """收到钉钉消息 → 转发到飞书"""
+        logger.info("[转发插件] 收到钉钉消息事件, enabled=%s, target=%s", self._enabled, self.feishu_target_session)
+
+        if not self._enabled or not self.feishu_target_session:
+            return
+        if self._is_duplicate(event):
+            event.stop_event()
+            return
+
+        msg_str = event.get_message_str()
+        messages = event.get_messages()
+        if not msg_str and not messages:
+            return
+
+        sender_name = event.get_sender_name() or "未知用户"
+        logger.info("钉钉→飞书转发: sender=%s, msg=%s", sender_name, event.get_message_outline()[:50])
+
+        try:
+            chain = self._build_forward_chain(messages, msg_str)
+            await StarTools.send_message(self.feishu_target_session, chain)
+            self._d2f_success += 1
+            logger.info("钉钉→飞书转发成功")
+        except Exception:
+            self._d2f_failure += 1
+            logger.error("钉钉→飞书转发失败", exc_info=True)
+
+        # 阻止 LLM 继续处理此消息
+        event.stop_event()
+
+    @event_message_type(EventMessageType.ALL)
+    @platform_adapter_type(PlatformAdapterType.LARK)
+    async def on_feishu_message(self, event: AstrMessageEvent):
+        """收到飞书消息 → 转发到钉钉"""
+        logger.info("[转发插件] 收到飞书消息事件, enabled=%s, target=%s", self._enabled, self.dingtalk_target_session)
+
+        if not self._enabled or not self.dingtalk_target_session:
+            return
+        if self._is_duplicate(event):
+            event.stop_event()
+            return
+
+        msg_str = event.get_message_str()
+        messages = event.get_messages()
+        if not msg_str and not messages:
+            return
+
+        sender_name = event.get_sender_name() or "未知用户"
+        logger.info("飞书→钉钉转发: sender=%s, msg=%s", sender_name, event.get_message_outline()[:50])
+
+        try:
+            chain = self._build_forward_chain(messages, msg_str)
+            await StarTools.send_message(self.dingtalk_target_session, chain)
+            self._f2d_success += 1
+            logger.info("飞书→钉钉转发成功")
+        except Exception:
+            self._f2d_failure += 1
+            logger.error("飞书→钉钉转发失败", exc_info=True)
+
+        # 阻止 LLM 继续处理此消息
+        event.stop_event()
+
+    def _is_duplicate(self, event: AstrMessageEvent) -> bool:
+        """检查消息是否重复，同时清理过期缓存。"""
+        now = time.time()
+        # 清理过期
+        expired = [k for k, v in self._seen_messages.items() if now - v > self._dedup_ttl]
+        for k in expired:
+            del self._seen_messages[k]
+
+        msg_id = getattr(event.message_obj, "message_id", "") or ""
+        if not msg_id:
+            return False
+        if msg_id in self._seen_messages:
+            logger.debug("跳过重复消息: %s", msg_id)
+            return True
+        self._seen_messages[msg_id] = now
+        return False
+
+    @staticmethod
+    def _build_forward_chain(
+        messages: list[BaseMessageComponent], fallback_text: str
+    ) -> MessageChain:
+        """从原始消息链构建转发消息链，保留图片等富文本组件。"""
+        if not messages:
+            return MessageChain(chain=[Plain(fallback_text)])
+
+        # 直接复用原始消息链中的组件
+        chain: list[BaseMessageComponent] = []
+        for comp in messages:
+            if isinstance(comp, (Plain, Image)):
+                chain.append(comp)
+
+        # 如果消息链里没提取到有效组件，用纯文本兜底
+        if not chain:
+            return MessageChain(chain=[Plain(fallback_text)])
+
+        return MessageChain(chain=chain)
+
+    @command("fwd_status")
+    async def fwd_status(self, event: AstrMessageEvent):
+        """查询转发插件运行状态"""
+        uptime = time.time() - self._start_time
+        hours, remainder = divmod(int(uptime), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        text = (
+            f"📊 钉钉-飞书转发插件状态\n"
+            f"运行时长: {hours}h {minutes}m {seconds}s\n"
+            f"启用: {'是' if self._enabled else '否'}\n"
+            f"\n钉钉 → 飞书: 成功 {self._d2f_success} / 失败 {self._d2f_failure}\n"
+            f"飞书 → 钉钉: 成功 {self._f2d_success} / 失败 {self._f2d_failure}"
+        )
+        yield event.plain_result(text)

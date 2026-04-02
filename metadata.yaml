@@ -1,0 +1,6 @@
+name: astrbot_plugin_dingtalk_feishu_forwarder
+display_name: 钉钉-飞书双向消息转发
+desc: 钉钉与飞书之间的双向消息转发插件，支持文本、图片等消息格式自动转换。
+version: v1.0.0
+author: zwwangoo
+repo: https://github.com/zwwangoo/astrbot_plugin_dingtalk_feishu_forwarder

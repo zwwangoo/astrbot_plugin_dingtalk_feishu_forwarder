@@ -1,0 +1,12 @@
+{
+    "feishu_target_session": {
+        "description": "飞书目标会话（接收钉钉转发的消息）",
+        "type": "string",
+        "hint": "填写飞书端的 unified_msg_origin。在飞书对话中发送 /sid 命令获取，格式如 lark_xxx:FriendMessage:ou_xxxx"
+    },
+    "dingtalk_target_session": {
+        "description": "钉钉目标会话（接收飞书转发的消息）",
+        "type": "string",
+        "hint": "填写钉钉端的 unified_msg_origin。在钉钉对话中发送 /sid 命令获取，格式如 dingtalk_xxx:FriendMessage:xxxx"
+    }
+}
