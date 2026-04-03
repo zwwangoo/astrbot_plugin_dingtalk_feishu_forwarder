@@ -7,7 +7,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.event import filter
 from astrbot.api.event.filter import EventMessageType, PlatformAdapterType
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.core.message.components import BaseMessageComponent, Image, Plain
+from astrbot.core.message.components import BaseMessageComponent, At, Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
 
 UNSUPPORTED_MSG_FALLBACK = "[不支持的消息类型，请在原平台查看]"
@@ -154,6 +154,8 @@ class DingTalkFeishuForwarder(Star):
         for comp in messages:
             if isinstance(comp, Plain):
                 chain.append(comp)
+            elif isinstance(comp, At):
+                pass  # @提及不转发，跳过即可
             elif isinstance(comp, Image):
                 url = comp.url or comp.file or ""
                 if url:
@@ -162,6 +164,7 @@ class DingTalkFeishuForwarder(Star):
                     chain.append(Plain("[图片无法转发，请在原平台查看]"))
             else:
                 has_unsupported = True
+                logger.debug("跳过未支持的消息组件: %s", type(comp).__name__)
 
         if has_unsupported and chain:
             chain.append(Plain("\n[包含未支持的消息组件，请在原平台查看完整内容]"))
